@@ -51,6 +51,11 @@ import (
     loadParam *tree.ExternParam
     tailParam *tree.TailParameter
 
+    functionName *tree.FunctionName
+    funcArg tree.FunctionArg
+    funcArgs tree.FunctionArgs
+    funcArgDecl *tree.FunctionArgDecl
+
     from *tree.From
     where *tree.Where
     groupBy tree.GroupBy
@@ -247,7 +252,7 @@ import (
 %token <str> LOW_PRIORITY HIGH_PRIORITY DELAYED
 
 // Create Table
-%token <str> CREATE ALTER DROP RENAME ANALYZE ADD
+%token <str> CREATE ALTER DROP RENAME ANALYZE ADD RETURNS
 %token <str> SCHEMA TABLE INDEX VIEW TO IGNORE IF PRIMARY COLUMN CONSTRAINT SPATIAL FULLTEXT FOREIGN KEY_BLOCK_SIZE
 %token <str> SHOW DESCRIBE EXPLAIN DATE ESCAPE REPAIR OPTIMIZE TRUNCATE
 %token <str> MAXVALUE PARTITION REORGANIZE LESS THAN PROCEDURE TRIGGER
@@ -358,7 +363,7 @@ import (
 %type <statement> drop_ddl_stmt drop_database_stmt drop_table_stmt drop_index_stmt drop_prepare_stmt drop_view_stmt
 %type <statement> drop_account_stmt drop_role_stmt drop_user_stmt
 %type <statement> create_account_stmt create_user_stmt create_role_stmt
-%type <statement> create_ddl_stmt create_table_stmt create_database_stmt create_index_stmt create_view_stmt
+%type <statement> create_ddl_stmt create_table_stmt create_database_stmt create_index_stmt create_view_stmt create_function_stmt
 %type <statement> show_stmt show_create_stmt show_columns_stmt show_databases_stmt show_target_filter_stmt show_table_status_stmt show_grants_stmt show_collation_stmt
 %type <statement> show_tables_stmt show_process_stmt show_errors_stmt show_warnings_stmt show_target
 %type <statement> show_variables_stmt show_status_stmt show_index_stmt
@@ -396,6 +401,12 @@ import (
 %type <str> insert_column
 %type <identifierList> column_list column_list_opt partition_clause_opt partition_id_list insert_column_list
 %type <joinCond> join_condition join_condition_opt on_expression_opt
+
+%type <functionName> func_name
+%type <funcArgs> func_args_list_opt func_args_list
+%type <funcArg> func_arg
+%type <funcArgDecl> func_arg_decl
+%type <str> func_lang
 
 %type <tableDefs> table_elem_list_opt table_elem_list
 %type <tableDef> table_elem constaint_def constraint_elem
@@ -3873,6 +3884,60 @@ create_ddl_stmt:
 |   create_database_stmt
 |   create_index_stmt
 |    create_view_stmt
+|   create_function_stmt
+
+create_function_stmt:
+    CREATE FUNCTION func_name '(' func_args_list_opt ')' RETURNS column_type AS STRING LANGUAGE func_lang
+    {
+        $$ = &tree.CreateFunction{
+            Name: $3,
+            Args: $5,
+            ReturnType: $8,
+            Body: $10,
+            Language: $12,
+        }
+    }
+
+func_name:
+    ident
+    {
+        $$ = tree.NewFuncName(tree.Identifier($1))
+    }
+
+func_args_list_opt:
+    {
+        $$ = tree.FunctionArgs(nil)
+    }
+|   func_args_list
+
+func_args_list:
+    func_arg
+    {
+        $$ = tree.FunctionArgs{$1}
+    }
+|   func_args_list ',' func_arg
+    {
+        $$ = append($1, $3)
+    }
+
+func_arg:
+    func_arg_decl
+    {
+        $$ = tree.FunctionArg($1)
+    }
+
+func_arg_decl:
+    column_type column_name
+    {
+        $$ = tree.NewFunctionArgDecl($2, $1)
+    }
+
+func_lang:
+    ident
+    {
+        $$ = $1
+    }
+
 
 create_view_stmt:
     CREATE temporary_opt view_recursive_opt VIEW table_name column_list_opt AS select_stmt
@@ -7654,6 +7719,7 @@ reserved_keyword:
 |   SECONDARY
 |   DECLARE
 |   MODUMP
+|   RETURNS
 
 non_reserved_keyword:
     ACCOUNT
