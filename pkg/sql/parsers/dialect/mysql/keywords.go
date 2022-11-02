@@ -335,6 +335,7 @@ func init() {
 		"resignal":                 UNUSED,
 		"restrict":                 RESTRICT,
 		"return":                   UNUSED,
+		"returns":                  RETURNS,
 		"revoke":                   REVOKE,
 		"reverse":                  REVERSE,
 		"reload":                   RELOAD,
