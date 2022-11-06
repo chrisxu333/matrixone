@@ -1721,13 +1721,12 @@ var (
 			output: `modump database t tables t1, t2 into a.sql max_file_size 1`,
 		},
 		{
-<<<<<<< HEAD
 			input:  `select mo_show_visible_bin('a',0) as m`,
 			output: `select mo_show_visible_bin(a, 0) as m`,
-=======
+		},
+		{
 			input:  `create function a (int a, int b) returns int as 'return a + b' language python`,
 			output: `create function a (int a, int b) returns int as 'return a + b' language python`,
->>>>>>> add parser support for basic create function syntax
 		},
 	}
 )
