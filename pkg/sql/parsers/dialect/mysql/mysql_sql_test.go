@@ -1654,8 +1654,16 @@ var (
 			output: `modump database t tables t1, t2 into a.sql max_file_size 1`,
 		},
 		{
-			input:  `create function a (int a, int b) returns int as 'return a + b' language python`,
-			output: `create function a (int a, int b) returns int as 'return a + b' language python`,
+			input: `create function a (int a, int b) returns int as '
+						import numpys as np
+						tmp = a + b
+						return tmp % a
+					' language python`,
+			output: `create function a (int a, int b) returns int as '
+						import numpys as np
+						tmp = a + b
+						return tmp % a
+					' language python`,
 		},
 	}
 )
