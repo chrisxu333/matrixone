@@ -1725,8 +1725,16 @@ var (
 			output: `select mo_show_visible_bin(a, 0) as m`,
 		},
 		{
-			input:  `create function a (int a, int b) returns int as 'return a + b' language python`,
-			output: `create function a (int a, int b) returns int as 'return a + b' language python`,
+			input: `create function a (int a, int b) returns int as '
+						import numpys as np
+						tmp = a + b
+						return tmp % a
+					' language python`,
+			output: `create function a (int a, int b) returns int as '
+						import numpys as np
+						tmp = a + b
+						return tmp % a
+					' language python`,
 		},
 	}
 )

@@ -17,12 +17,13 @@ package frontend
 import (
 	"context"
 	"fmt"
-	"github.com/matrixorigin/matrixone/pkg/util/metric"
-	"github.com/matrixorigin/matrixone/pkg/util/trace"
 	"math"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/matrixorigin/matrixone/pkg/util/metric"
+	"github.com/matrixorigin/matrixone/pkg/util/trace"
 
 	"github.com/matrixorigin/matrixone/pkg/util/sysview"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/matrixorigin/matrixone/pkg/config"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	plan2 "github.com/matrixorigin/matrixone/pkg/sql/plan"
 	"github.com/tidwall/btree"
@@ -411,6 +413,7 @@ const (
 	PrivilegeTypeCreateObject //includes: table, view, stream, sequence, function, dblink,etc
 	PrivilegeTypeCreateTable
 	PrivilegeTypeCreateView
+	PrivilegeTypeCreateFunction
 	PrivilegeTypeDropObject
 	PrivilegeTypeDropTable
 	PrivilegeTypeDropView
@@ -527,6 +530,8 @@ func (pt PrivilegeType) String() string {
 		return "create table"
 	case PrivilegeTypeCreateView:
 		return "create view"
+	case PrivilegeTypeCreateFunction:
+		return "create function"
 	case PrivilegeTypeDropObject:
 		return "drop object"
 	case PrivilegeTypeDropTable:
@@ -611,7 +616,7 @@ func (pt PrivilegeType) Scope() PrivilegeScope {
 		return PrivilegeScopeRole
 	case PrivilegeTypeShowTables:
 		return PrivilegeScopeDatabase
-	case PrivilegeTypeCreateObject, PrivilegeTypeCreateTable, PrivilegeTypeCreateView:
+	case PrivilegeTypeCreateObject, PrivilegeTypeCreateTable, PrivilegeTypeCreateView, PrivilegeTypeCreateFunction:
 		return PrivilegeScopeDatabase
 	case PrivilegeTypeDropObject, PrivilegeTypeDropTable, PrivilegeTypeDropView:
 		return PrivilegeScopeDatabase
@@ -723,6 +728,13 @@ var (
 				granted_time timestamp,
 				with_grant_option bool
 			);`,
+		`create table mo_user_defined_function(
+				func_id int signed,
+				func_name varchar(100),
+				return_type varchar(10),
+				func_body text,
+				language varchar(20)
+			);`,
 	}
 
 	//drop tables for the tenant
@@ -807,6 +819,9 @@ var (
 )
 
 const (
+	// user-defined function insertion
+	createFunctionFormat = `insert into mo_catalog.mo_user_defined_function(func_id, func_name, return_type, func_body, language) 
+								values (%d,"%s","%s","%s","%s");`
 	//privilege verification
 	checkTenantFormat = `select account_id,account_name from mo_catalog.mo_account where account_name = "%s";`
 
@@ -1357,6 +1372,7 @@ var (
 		PrivilegeTypeCreateObject:      {PrivilegeTypeCreateObject, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
 		PrivilegeTypeCreateTable:       {PrivilegeTypeCreateTable, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
 		PrivilegeTypeCreateView:        {PrivilegeTypeCreateView, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
+		PrivilegeTypeCreateFunction:    {PrivilegeTypeCreateFunction, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
 		PrivilegeTypeDropObject:        {PrivilegeTypeDropObject, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
 		PrivilegeTypeDropTable:         {PrivilegeTypeDropTable, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
 		PrivilegeTypeDropView:          {PrivilegeTypeDropView, privilegeLevelStar, objectTypeDatabase, objectIDAll, true, "", "", privilegeEntryTypeGeneral, nil},
@@ -1401,6 +1417,7 @@ var (
 		PrivilegeTypeCreateView,
 		PrivilegeTypeDropView,
 		PrivilegeTypeAlterView,
+		PrivilegeTypeCreateFunction,
 		PrivilegeTypeDatabaseAll,
 		PrivilegeTypeDatabaseOwnership,
 		PrivilegeTypeSelect,
@@ -1435,6 +1452,7 @@ var (
 		PrivilegeTypeCreateView,
 		PrivilegeTypeDropView,
 		PrivilegeTypeAlterView,
+		PrivilegeTypeCreateFunction,
 		PrivilegeTypeDatabaseAll,
 		PrivilegeTypeDatabaseOwnership,
 		PrivilegeTypeSelect,
@@ -3098,6 +3116,10 @@ func determinePrivilegeSetOfStatement(stmt tree.Statement) *privilege {
 		if st.Name != nil {
 			dbName = string(st.Name.SchemaName)
 		}
+	case *tree.CreateFunction:
+		objType = objectTypeDatabase
+		typs = append(typs, PrivilegeTypeCreateFunction, PrivilegeTypeDatabaseAll, PrivilegeTypeDatabaseOwnership)
+		writeDatabaseAndTableDirectly = true
 	case *tree.DropTable:
 		objType = objectTypeDatabase
 		typs = append(typs, PrivilegeTypeDropTable, PrivilegeTypeDropObject, PrivilegeTypeDatabaseAll, PrivilegeTypeDatabaseOwnership)
@@ -5302,6 +5324,54 @@ func InitRole(ctx context.Context, tenant *TenantInfo, cr *tree.CreateRole) erro
 	}
 
 	return err
+handleFailed:
+	//ROLLBACK the transaction
+	rbErr := bh.Exec(ctx, "rollback;")
+	if rbErr != nil {
+		return rbErr
+	}
+	return err
+}
+
+func InitFunction(ctx context.Context, cf *tree.CreateFunction) error {
+	var err error
+	var initFunction string
+	var fmtCtx *tree.FmtCtx
+	var retType string
+	/* step 1: store the function into the designated table */
+	pu := config.GetParameterUnit(ctx)
+	mp, err := mpool.NewMPool("init_function", 0, mpool.NoFixed)
+	if err != nil {
+		return err
+	}
+	defer mpool.DeleteMPool(mp)
+
+	bh := NewBackgroundHandler(ctx, mp, pu)
+	defer bh.Close()
+
+	err = bh.Exec(ctx, "begin;")
+	if err != nil {
+		goto handleFailed
+	}
+
+	/* core logic of storing the function comes here */
+	fmtCtx = tree.NewFmtCtx(dialect.MYSQL)
+	cf.ReturnType.(*tree.T).InternalType.Format(fmtCtx)
+	retType = fmtCtx.String()
+	initFunction = fmt.Sprintf(createFunctionFormat, 1, cf.Name.Name, retType, cf.Body, cf.Language)
+	bh.ClearExecResultSet()
+	err = bh.Exec(ctx, initFunction)
+	if err != nil {
+		goto handleFailed
+	}
+
+	err = bh.Exec(ctx, "commit;")
+	if err != nil {
+		goto handleFailed
+	}
+
+	/* TODO: step 2: register the function as with the builtin function */
+
 handleFailed:
 	//ROLLBACK the transaction
 	rbErr := bh.Exec(ctx, "rollback;")

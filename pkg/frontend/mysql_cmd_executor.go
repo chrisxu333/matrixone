@@ -1920,6 +1920,11 @@ func (mce *MysqlCmdExecutor) handleSwitchRole(ctx context.Context, sr *tree.SetR
 	return doSwitchRole(ctx, mce.GetSession(), sr)
 }
 
+// handleCreateFunction creates a record inside mo_catalog.mo_user_defined_function table
+func (mce *MysqlCmdExecutor) handleCreateFunction(ctx context.Context, cf *tree.CreateFunction) error {
+	return InitFunction(ctx, cf)
+}
+
 func GetExplainColumns(explainColName string) ([]interface{}, error) {
 	cols := []*plan2.ColDef{
 		{Typ: &plan2.Type{Id: int32(types.T_varchar)}, Name: explainColName},
@@ -2151,11 +2156,13 @@ func (cwft *TxnComputationWrapper) Compile(requestCtx context.Context, u interfa
 		}
 	}
 	cwft.proc.FileService = cwft.ses.GetParameterUnit().FileService
+	// Nuo: 申请新compile实例
 	cwft.compile = compile.New(cwft.ses.GetDatabaseName(), cwft.ses.GetSql(), cwft.ses.GetUserName(), requestCtx, cwft.ses.GetStorage(), cwft.proc, cwft.stmt)
 
 	if _, ok := cwft.stmt.(*tree.ExplainAnalyze); ok {
 		fill = func(obj interface{}, bat *batch.Batch) error { return nil }
 	}
+	// Nuo: compile ast into exec array
 	err = cwft.compile.Compile(cwft.plan, cwft.ses, fill)
 	if err != nil {
 		return nil, err
@@ -2222,11 +2229,11 @@ func buildPlan(requestCtx context.Context, ses *Session, ctx plan2.CompilerConte
 			},
 		}
 	default:
-		ret, err = plan2.BuildPlan(ctx, stmt)
+		ret, err = plan2.BuildPlan(ctx, stmt) // returns a plan struct
 	}
 	if ret != nil {
 		if ses != nil && ses.GetTenantInfo() != nil {
-			err = authenticateCanExecuteStatementAndPlan(requestCtx, ses, stmt, ret)
+			err = authenticateCanExecuteStatementAndPlan(requestCtx, ses, stmt, ret) // check if the plan works
 			if err != nil {
 				return nil, err
 			}
@@ -2250,6 +2257,7 @@ var GetComputationWrapper = func(db, sql, user string, eng engine.Engine, proc *
 		}
 		stmts = append(stmts, cmdFieldStmt)
 	} else {
+		// get stmts here
 		stmts, err = parsers.Parse(dialect.MYSQL, sql)
 		if err != nil {
 			return nil, err
@@ -2451,11 +2459,11 @@ func (mce *MysqlCmdExecutor) doComQuery(requestCtx context.Context, sql string) 
 	var mrs *MysqlResultSet
 
 	singleStatement := len(cws) == 1
-	for _, cw := range cws {
-		ses.SetMysqlResultSet(&MysqlResultSet{})
-		stmt := cw.GetAst()
-		requestCtx = RecordStatement(requestCtx, ses, proc, cw, beginInstant, sql, singleStatement)
-		tenant := ses.GetTenantName(stmt)
+	for _, cw := range cws { // for each computation wrapper
+		ses.SetMysqlResultSet(&MysqlResultSet{})                                                    // set an empty result set
+		stmt := cw.GetAst()                                                                         // get parsed ast from computation wrapper
+		requestCtx = RecordStatement(requestCtx, ses, proc, cw, beginInstant, sql, singleStatement) // what does this do?
+		tenant := ses.GetTenantName(stmt)                                                           // what does this do?
 		//skip PREPARE statement here
 		if ses.GetTenantInfo() != nil && !IsPrepareStatement(stmt) {
 			err = authenticateUserCanExecuteStatement(requestCtx, ses, stmt)
@@ -2697,6 +2705,11 @@ func (mce *MysqlCmdExecutor) doComQuery(requestCtx context.Context, sql string) 
 					goto handleFailed
 				}
 			}
+		case *tree.CreateFunction:
+			selfHandle = true
+			if err = mce.handleCreateFunction(requestCtx, st); err != nil {
+				goto handleFailed
+			}
 		}
 
 		if selfHandle {
@@ -2827,6 +2840,7 @@ func (mce *MysqlCmdExecutor) doComQuery(requestCtx context.Context, sql string) 
 		case *tree.CreateTable, *tree.DropTable, *tree.CreateDatabase, *tree.DropDatabase,
 			*tree.CreateIndex, *tree.DropIndex,
 			*tree.CreateView, *tree.DropView,
+			*tree.CreateFunction,
 			*tree.Insert, *tree.Update,
 			*tree.BeginTransaction, *tree.CommitTransaction, *tree.RollbackTransaction,
 			*tree.SetVar,
@@ -2967,7 +2981,7 @@ func (mce *MysqlCmdExecutor) doComQuery(requestCtx context.Context, sql string) 
 		}
 		switch stmt.(type) {
 		case *tree.CreateTable, *tree.DropTable, *tree.CreateDatabase, *tree.DropDatabase,
-			*tree.CreateIndex, *tree.DropIndex, *tree.Insert, *tree.Update,
+			*tree.CreateFunction, *tree.CreateIndex, *tree.DropIndex, *tree.Insert, *tree.Update,
 			*tree.CreateView, *tree.DropView, *tree.Load, *tree.MoDump,
 			*tree.CreateAccount, *tree.DropAccount, *tree.AlterAccount,
 			*tree.CreateUser, *tree.DropUser, *tree.AlterUser,
@@ -3249,7 +3263,7 @@ StatementCanBeExecutedInUncommittedTransaction checks the statement can be execu
 func StatementCanBeExecutedInUncommittedTransaction(ses *Session, stmt tree.Statement) (bool, error) {
 	switch st := stmt.(type) {
 	//ddl statement
-	case *tree.CreateTable, *tree.CreateDatabase, *tree.CreateIndex, *tree.CreateView:
+	case *tree.CreateTable, *tree.CreateDatabase, *tree.CreateIndex, *tree.CreateView, *tree.CreateFunction:
 		return true, nil
 		//dml statement
 	case *tree.Insert, *tree.Update, *tree.Delete, *tree.Select, *tree.Load, *tree.MoDump:
@@ -3299,6 +3313,7 @@ func IsDDL(stmt tree.Statement) bool {
 	switch stmt.(type) {
 	case *tree.CreateTable, *tree.DropTable,
 		*tree.CreateView, *tree.DropView,
+		*tree.CreateFunction,
 		*tree.CreateDatabase, *tree.DropDatabase,
 		*tree.CreateIndex, *tree.DropIndex, *tree.TruncateTable:
 		return true
@@ -3321,6 +3336,7 @@ func IsAdministrativeStatement(stmt tree.Statement) bool {
 	case *tree.CreateAccount, *tree.DropAccount, *tree.AlterAccount,
 		*tree.CreateUser, *tree.DropUser, *tree.AlterUser,
 		*tree.CreateRole, *tree.DropRole,
+		*tree.CreateFunction,
 		*tree.Revoke, *tree.Grant,
 		*tree.SetDefaultRole, *tree.SetRole, *tree.SetPassword:
 		return true
