@@ -21,12 +21,16 @@ import (
 	"go/constant"
 	"strings"
 
+	"github.com/matrixorigin/matrixone/pkg/catalog"
+	"github.com/matrixorigin/matrixone/pkg/logutil"
+	"github.com/matrixorigin/matrixone/pkg/sql/parsers"
 	"github.com/matrixorigin/matrixone/pkg/sql/plan/function/builtin/binary"
 	"github.com/matrixorigin/matrixone/pkg/util/errutil"
 
 	"github.com/matrixorigin/matrixone/pkg/common/moerr"
 	"github.com/matrixorigin/matrixone/pkg/container/types"
 	"github.com/matrixorigin/matrixone/pkg/pb/plan"
+	"github.com/matrixorigin/matrixone/pkg/sql/colexec"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/dialect"
 	"github.com/matrixorigin/matrixone/pkg/sql/parsers/tree"
 	"github.com/matrixorigin/matrixone/pkg/sql/plan/function"
@@ -348,6 +352,11 @@ func (b *baseBinder) baseBindSubquery(astExpr *tree.Subquery, isRoot bool) (*Exp
 	switch subquery := astExpr.Select.(type) {
 	case *tree.ParenSelect:
 		nodeID, err = b.builder.buildSelect(subquery.Select, subCtx, false)
+		if err != nil {
+			return nil, err
+		}
+	case *tree.Select:
+		nodeID, err = b.builder.buildSelect(subquery, subCtx, false)
 		if err != nil {
 			return nil, err
 		}
@@ -706,7 +715,75 @@ func (b *baseBinder) bindFuncExprImplByAstExpr(name string, astArgs []tree.Expr,
 		args[idx] = expr
 	}
 
+	// look to resolve udf
+	var rowIndex int64
+
+	cmpCtx := b.builder.compCtx
+	proc := cmpCtx.GetProcess()
+	engine := cmpCtx.GetEngine()
+	txn, err := colexec.NewTxn(engine, proc, b.GetContext())
+	if err != nil {
+		return nil, err
+	}
+	db, err := engine.Database(b.GetContext(), catalog.MO_CATALOG, txn)
+	if err != nil {
+		return nil, err
+	}
+	table, err := db.Relation(b.GetContext(), "mo_user_defined_function")
+	if err != nil {
+		return nil, err
+	}
+
+	reader, err := table.NewReader(b.GetContext(), 1, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var UDF_TABLE_COLNAME []string = []string{catalog.Row_ID, "name", "args", "body"}
+
+	bat, err := reader[0].Read(b.GetContext(), UDF_TABLE_COLNAME, nil, proc.Mp())
+	if err != nil {
+		return nil, err
+	}
+
+	if bat == nil {
+		reader[0].Close()
+		return bindFuncExprImplByPlanExpr(b.GetContext(), name, args)
+	}
+
+	for rowIndex = 0; rowIndex < int64(bat.Length()); rowIndex++ {
+		funcName := bat.Vecs[1].GetString(rowIndex)
+		if funcName == name {
+			// perform args check and replacement here
+			logutil.Debug("Got match function: " + funcName)
+			funcArgs := bat.Vecs[2].GetString(rowIndex)
+			funcBody := bat.Vecs[3].GetString(rowIndex)
+			logutil.Debug("Function args: " + funcArgs + " body: " + funcBody)
+			udfExpr, err := bindFuncExprImplUdf(b, name, args)
+			if err != nil {
+				return nil, err
+			}
+
+			if udfExpr != nil {
+				return udfExpr, nil
+			}
+		}
+	}
+
 	return bindFuncExprImplByPlanExpr(b.GetContext(), name, args)
+}
+
+func bindFuncExprImplUdf(b *baseBinder, name string, args []*Expr) (*plan.Expr, error) {
+	substmts, err := parsers.Parse(b.GetContext(), dialect.MYSQL, "(select 3 + 1)")
+	if err != nil {
+		return nil, err
+	}
+	subquery := tree.NewSubquery(substmts[0], false)
+	expr, err := b.impl.BindSubquery(subquery, false)
+	if err != nil {
+		return nil, err
+	}
+	return expr, nil
 }
 
 func bindFuncExprImplByPlanExpr(ctx context.Context, name string, args []*Expr) (*plan.Expr, error) {

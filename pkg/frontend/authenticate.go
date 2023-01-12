@@ -816,6 +816,7 @@ var (
 	initMoMysqlCompatbilityModeFormat = `insert into mo_catalog.mo_mysql_compatbility_mode(
 		dat_name,
 		configuration) values ("%s",%s);`
+	initMoUserDefinedFunctionPlaceHolderFormat = `insert into mo_catalog.mo_user_defined_function(function_id) values (1000);`
 
 	initMoUserDefinedFunctionFormat = `insert into mo_catalog.mo_user_defined_function(
 			name,
@@ -5229,6 +5230,9 @@ func createTablesInMoCatalog(ctx context.Context, bh BackgroundExec, tenant *Ten
 	for _, sql := range createSqls {
 		addSqlIntoSet(sql)
 	}
+
+	// add placeholder udf for large id
+	addSqlIntoSet(initMoUserDefinedFunctionPlaceHolderFormat)
 
 	//initialize the default data of tables for the tenant
 	//step 1: add new tenant entry to the mo_account

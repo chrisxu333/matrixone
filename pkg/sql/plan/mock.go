@@ -20,6 +20,7 @@ import (
 	"strings"
 
 	"github.com/matrixorigin/matrixone/pkg/testutil"
+	"github.com/matrixorigin/matrixone/pkg/vm/engine"
 	"github.com/matrixorigin/matrixone/pkg/vm/process"
 
 	"github.com/matrixorigin/matrixone/pkg/catalog"
@@ -40,6 +41,10 @@ type MockCompilerContext struct {
 
 	// ctx default: nil
 	ctx context.Context
+}
+
+func (m *MockCompilerContext) GetEngine() engine.Engine {
+	return nil
 }
 
 func (m *MockCompilerContext) ResolveAccountIds(accountNames []string) ([]uint32, error) {
